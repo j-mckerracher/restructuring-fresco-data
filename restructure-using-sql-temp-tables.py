@@ -389,7 +389,7 @@ def merge_and_export_data(mm: int, yyyy: int):
     yyyy = 2022  # TODO REMOVE AFTER TESTING
 
     # 0. Read Data & Remove Duplicates -> exit if either temp table is empty
-    if not create_temp_host_data_table(mm, yyyy) or create_temp_job_data_table(mm, yyyy):
+    if not create_temp_host_data_table(mm, yyyy) or not create_temp_job_data_table(mm, yyyy):
         return
 
     # 1. remove multi-host jobs
