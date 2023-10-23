@@ -1,14 +1,26 @@
-import csv
 import time
-
+import datetime
+import pytz
 import psycopg2 as psycopg2
 
 conn = psycopg2.connect(host="localhost", dbname="postgres", user="postgres", password="postgres")
 cur = conn.cursor()
 
 
+def print_mountain_time():
+    # Get the current UTC time
+    utc_now = datetime.datetime.now(pytz.utc)
+
+    # Convert the UTC time to Mountain Time
+    mountain_time = utc_now.astimezone(pytz.timezone('US/Mountain'))
+
+    print(mountain_time)
+
+
 def drop_tables_if_exist():
     """Drops multiple tables if they exist."""
+    print(f"Starting drop_tables_if_exist")
+
     table_names = [
         "event_cpuuser",
         "event_gpu_usage",
@@ -49,7 +61,8 @@ def print_table_cols(table_name):
         print(f"Error fetching columns for table {table_name}: {e}")
 
 
-def create_temp_host_data_table_and_remove_duplicates(month, year):
+def create_temp_host_data_table(month, year) -> bool:
+    print(f"Starting create_temp_host_data_table at {print_mountain_time()}")
     dedup_host_data = f"""
     CREATE TEMP TABLE temp_host_data AS 
     SELECT DISTINCT 
@@ -64,18 +77,19 @@ def create_temp_host_data_table_and_remove_duplicates(month, year):
 
     cur.execute(dedup_host_data)
 
-    # Execute the query to check for temp_host_data
-    check_temp_host_data = "SELECT tablename FROM pg_tables WHERE tablename = 'temp_host_data';"
-    cur.execute(check_temp_host_data)
-    result_host_data = cur.fetchone()
+    # Check the number of rows in temp_job_data
+    cur.execute("SELECT COUNT(*) FROM temp_host_data;")
+    row_count = cur.fetchone()[0]
 
-    if result_host_data:
-        print("temp_host_data table was created successfully.")
-    else:
-        print("temp_host_data table was not found.")
+    if row_count == 0:
+        print(f"temp_host_data table has 0 rows for month: {month} year: {year}")
+        return False
+
+    return True
 
 
-def create_temp_job_data_table_and_remove_duplicates(month, year):
+def create_temp_job_data_table(month, year) -> bool:
+    print(f"Starting create_temp_job_data_table at {print_mountain_time()}")
     dedup_job_data = f"""
     CREATE TEMP TABLE temp_job_data AS 
     SELECT DISTINCT 
@@ -90,18 +104,19 @@ def create_temp_job_data_table_and_remove_duplicates(month, year):
 
     cur.execute(dedup_job_data)
 
-    # Execute the query to check for temp_job_data
-    check_temp_job_data = "SELECT tablename FROM pg_tables WHERE tablename = 'temp_job_data';"
-    cur.execute(check_temp_job_data)
-    result_job_data = cur.fetchone()
+    # Check the number of rows in temp_job_data
+    cur.execute("SELECT COUNT(*) FROM temp_job_data;")
+    row_count = cur.fetchone()[0]
 
-    if result_job_data:
-        print("temp_job_data table was created successfully.")
-    else:
-        print("temp_job_data table was not found.")
+    if row_count == 0:
+        print(f"temp_job_data table has 0 rows for month: {month} year: {year}")
+        return False
+
+    return True
 
 
 def remove_multi_host_jobs_from_job_accounting_data():
+    print(f"Starting remove_multi_host_jobs_from_job_accounting_data at {print_mountain_time()}")
     filter_job_data_for_single_nodes = """
     CREATE TEMP TABLE temp_job_data_single_node AS 
     SELECT 
@@ -117,38 +132,44 @@ def remove_multi_host_jobs_from_job_accounting_data():
 
 
 def inner_join_on_job_id():
+    print(f"Starting inner_join_on_job_id at {print_mountain_time()}")
     merge_tables_on_jid = """
     CREATE TEMP TABLE merged_data AS 
     SELECT 
-        h.*,
+        h.time,
+        h.host,
+        h.jid,
+        h.event,
+        h.unit,
+        h.value,
         j.ngpus,
         j.submit_time,
         j.start_time,
         j.end_time,
-        j.runtime,
         j.timelimit,
-        j.node_hrs,
         j.nhosts,
         j.ncores,
         j.host_list,
         j.username,
         j.account,
         j.queue,
-        j.state,
         j.jobname,
         j.exitcode
     FROM temp_host_data h 
     JOIN temp_job_data_single_node j ON h.jid = j.jid;
     """
     cur.execute(merge_tables_on_jid)
+
     print("inner_join_on_job_id done")
 
 
 def group_by_metric():
+    print(f"Starting group_by_metric at {print_mountain_time()}")
     # Get the distinct events from merged_data
     get_events_query = "SELECT DISTINCT event FROM merged_data;"
     cur.execute(get_events_query)
     events = [row[0] for row in cur.fetchall()]
+    print(f'events = {events}')
 
     # Loop through each event and create the temp table
     for event in events:
@@ -162,30 +183,49 @@ def group_by_metric():
     print("group_by_metric done")
 
 
-def merge_block_and_cpu_user_data():
+def create_block_and_cpu_temp_table():
+    print(f"Starting create_block_and_cpu_temp_table at {print_mountain_time()}")
+
+    # Create indexes on the joining columns for the tables involved in the join
+    create_idx_event_block = "CREATE INDEX IF NOT EXISTS idx_event_block ON event_block(time, jid, host);"
+    cur.execute(create_idx_event_block)
+
+    create_idx_event_cpuuser = "CREATE INDEX IF NOT EXISTS idx_event_cpuuser ON event_cpuuser(time, jid, host);"
+    cur.execute(create_idx_event_cpuuser)
+
+    conn.commit()  # Commit after creating indexes
+
+    # Perform the join operation
     merge_block_and_cpu_user = """
     CREATE TEMP TABLE block_and_cpu AS 
     SELECT 
-        b.jid AS "jid", 
-        b.time AS "time", 
-        b.host AS "host", 
+        b.*,
+        c.* EXCEPT (value),
         b.value AS "value_block", 
-        c.value AS "value_cpuuser", 
-        j.exitcode AS "exitcode", 
-        j.queue AS "queue" 
+        c.value AS "value_cpuuser"
     FROM 
         event_block b 
     JOIN 
         event_cpuuser c ON b.time = c.time AND b.jid = c.jid AND b.host = c.host 
-    JOIN 
-        merged_data j ON b.jid = j.jid;
     """
-
     cur.execute(merge_block_and_cpu_user)
-    print("merge_block_and_cpu_user_data done")
+
+    conn.commit()  # Commit after the join operation
+
+    # Drop the indexes, since they were only needed for the join operation
+    drop_idx_event_block = "DROP INDEX idx_event_block;"
+    cur.execute(drop_idx_event_block)
+
+    drop_idx_event_cpuuser = "DROP INDEX idx_event_cpuuser;"
+    cur.execute(drop_idx_event_cpuuser)
+
+    conn.commit()  # Commit after dropping indexes
+
+    print("create_block_and_cpu_temp_table done")
 
 
-def create_block_cpu_gpu_data():
+def create_block_cpu_gpu_temp_table():
+    print(f"Starting create_block_cpu_gpu_temp_table at {print_mountain_time()}")
     # Create indexes
     create_idx_block_and_cpu = "CREATE INDEX IF NOT EXISTS idx_block_and_cpu ON block_and_cpu(time, jid, host);"
     cur.execute(create_idx_block_and_cpu)
@@ -196,21 +236,15 @@ def create_block_cpu_gpu_data():
     conn.commit()  # Commit after creating indexes
 
     # Perform the join operation
-    create_block_cpu_gpu = '''
+    create_block_cpu_gpu = """
     CREATE TEMP TABLE block_cpu_gpu AS 
     SELECT 
-        bc."jid", 
-        bc."time", 
-        bc."host", 
-        bc."value_block", 
-        bc."value_cpuuser", 
-        g.value AS "value_gpu",
-        bc."exitcode", 
-        bc."queue"
+        bc.*,
+        g.value AS "value_gpu"
     FROM block_and_cpu bc 
     LEFT JOIN event_gpu_usage g 
     ON bc."time" = g.time AND bc."jid" = g.jid AND bc."host" = g.host;
-    '''
+    """
     cur.execute(create_block_cpu_gpu)
 
     conn.commit()  # Commit after the join operation
@@ -224,10 +258,11 @@ def create_block_cpu_gpu_data():
 
     conn.commit()  # Commit after dropping indexes
 
-    print("create_block_cpu_gpu_data done")
+    print("create_block_cpu_gpu_temp_table done")
 
 
-def create_block_cpu_gpu_memused_data():
+def create_block_cpu_gpu_memused_temp_table():
+    print(f"Starting create_block_cpu_gpu_memused_temp_table at {print_mountain_time()}")
     # Create indexes on the joining columns for both tables
     create_idx_block_cpu_gpu = "CREATE INDEX IF NOT EXISTS idx_block_cpu_gpu ON block_cpu_gpu(time, jid, host);"
     cur.execute(create_idx_block_cpu_gpu)
@@ -261,10 +296,11 @@ def create_block_cpu_gpu_memused_data():
 
     conn.commit()  # Commit after dropping indexes
 
-    print("create_block_cpu_gpu_memused_data done")
+    print("create_block_cpu_gpu_memused_temp_table done")
 
 
-def create_block_cpu_gpu_memused_nodisk_data():
+def create_block_cpu_gpu_memused_nodisk_temp_table():
+    print(f"Starting create_block_cpu_gpu_memused_nodisk_temp_table at {print_mountain_time()}")
     # Create indexes on the joining columns for both tables
     create_idx_block_cpu_gpu_memused = "CREATE INDEX IF NOT EXISTS idx_block_cpu_gpu_memused ON block_cpu_gpu_memused(time, jid, host);"
     cur.execute(create_idx_block_cpu_gpu_memused)
@@ -298,10 +334,11 @@ def create_block_cpu_gpu_memused_nodisk_data():
 
     conn.commit()  # Commit after dropping indexes
 
-    print("create_block_cpu_gpu_memused_nodisk_data done")
+    print("create_block_cpu_gpu_memused_nodisk_temp_table done")
 
 
-def create_full_merged_data():
+def create_full_merged_temp_table():
+    print(f"Starting create_full_merged_temp_table at {print_mountain_time()}")
     # Create indexes on the joining columns for both tables
     create_idx_block_cpu_gpu_memused_nodisk = "CREATE INDEX IF NOT EXISTS idx_block_cpu_gpu_memused_nodisk ON block_cpu_gpu_memused_nodisk(time, jid, host);"
     cur.execute(create_idx_block_cpu_gpu_memused_nodisk)
@@ -335,10 +372,11 @@ def create_full_merged_data():
 
     conn.commit()  # Commit after dropping indexes
 
-    print("create_full_merged_data done")
+    print("create_full_merged_temp_table done")
 
 
 def export_full_merged_data_to_csv(save_destination):
+    print(f"Starting export_full_merged_data_to_csv at {print_mountain_time()}")
     copy_query = f"COPY full_merged TO STDOUT WITH CSV HEADER"
     with open(save_destination, 'w', newline='') as csvfile:
         cur.copy_expert(copy_query, csvfile)
@@ -347,24 +385,38 @@ def export_full_merged_data_to_csv(save_destination):
 
 
 def merge_and_export_data(mm: int, yyyy: int):
-    create_temp_host_data_table_and_remove_duplicates(mm, yyyy)
-    create_temp_job_data_table_and_remove_duplicates(mm, yyyy)
+    mm = 9  # TODO REMOVE AFTER TESTING
+    yyyy = 2022  # TODO REMOVE AFTER TESTING
+
+    # 0. Read Data & Remove Duplicates -> exit if either temp table is empty
+    if not create_temp_host_data_table(mm, yyyy) or create_temp_job_data_table(mm, yyyy):
+        return
+
+    # 1. remove multi-host jobs
     remove_multi_host_jobs_from_job_accounting_data()
+
+    # 2. inner join on job id
     inner_join_on_job_id()
+
+    # 3. group dfs by metric
     group_by_metric()
-    merge_block_and_cpu_user_data()
-    create_block_cpu_gpu_data()
-    create_block_cpu_gpu_memused_data()
-    create_block_cpu_gpu_memused_nodisk_data()
-    create_full_merged_data()
-    export_full_merged_data_to_csv(f"C:\\Users\\jmckerra\\Documents\\AryamaanData\\{mm}_{yyyy}_full_merged.csv")
+
+    # 4. create temp tables
+    create_block_and_cpu_temp_table()
+    create_block_cpu_gpu_temp_table()
+    create_block_cpu_gpu_memused_temp_table()
+    create_block_cpu_gpu_memused_nodisk_temp_table()
+    create_full_merged_temp_table()
+
+    # 5. export to csv
+    export_full_merged_data_to_csv(f"{mm}_{yyyy}_full_merged.csv")
 
 
 def merge_and_export_all_data():
     # drop all temporary tables
     drop_tables_if_exist()
 
-    months_years = {}  # this will be {month: year}
+    months_years = {}  # {month: year}
 
     # SQL query to get distinct month-year combinations
     months_years_query = """
@@ -394,9 +446,11 @@ def merge_and_export_all_data():
     # Iterate through the dictionary and call the merge_and_export_data function
     for month, year in months_years.items():
         merge_and_export_data(month, year)
+        break  # TODO REMOVE AFTER TESTING
 
 
 if __name__ == "__main__":
+    print_mountain_time()
     start_time = time.time()
 
     merge_and_export_all_data()
