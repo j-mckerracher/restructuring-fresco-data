@@ -14,7 +14,10 @@ def print_mountain_time():
     # Convert the UTC time to Mountain Time
     mountain_time = utc_now.astimezone(pytz.timezone('US/Mountain'))
 
-    print(mountain_time)
+    # Format the mountain_time to only include up to seconds
+    formatted_time = mountain_time.strftime('%H:%M:%S')
+
+    return formatted_time
 
 
 def drop_tables_if_exist():
@@ -54,9 +57,7 @@ def print_table_cols(table_name):
     try:
         cur.execute(get_columns_query, (table_name,))
         column_names = [row[0] for row in cur.fetchall()]
-        print(f"Columns in {table_name}:")
-        for col in column_names:
-            print(col)
+        print(f"Columns in {table_name}: {column_names}")
     except Exception as e:
         print(f"Error fetching columns for table {table_name}: {e}")
 
@@ -134,30 +135,30 @@ def remove_multi_host_jobs_from_job_accounting_data():
 def inner_join_on_job_id():
     print(f"Starting inner_join_on_job_id at {print_mountain_time()}")
     merge_tables_on_jid = """
-    CREATE TEMP TABLE merged_data AS 
-    SELECT 
-        h.time,
-        h.host,
-        h.jid,
-        h.event,
-        h.unit,
-        h.value,
-        j.ngpus,
-        j.submit_time,
-        j.start_time,
-        j.end_time,
-        j.timelimit,
-        j.nhosts,
-        j.ncores,
-        j.host_list,
-        j.username,
-        j.account,
-        j.queue,
-        j.jobname,
-        j.exitcode
-    FROM temp_host_data h 
-    JOIN temp_job_data_single_node j ON h.jid = j.jid;
-    """
+        CREATE TEMP TABLE merged_data AS 
+        SELECT
+            h.time,
+            h.host,
+            h.jid,
+            h.event,
+            h.unit,
+            h.value,
+            j.exitcode,
+            j.timelimit,
+            j.ngpus,
+            j.account,
+            j.username,
+            j.start_time,
+            j.nhosts,
+            j.end_time,
+            j.host_list,
+            j.queue,
+            j.submit_time,
+            j.ncores,
+            j.jobname
+        FROM temp_host_data h 
+        JOIN temp_job_data_single_node j ON h.jid = j.jid;
+        """
     cur.execute(merge_tables_on_jid)
 
     print("inner_join_on_job_id done")
@@ -199,15 +200,50 @@ def create_block_and_cpu_temp_table():
     merge_block_and_cpu_user = """
     CREATE TEMP TABLE block_and_cpu AS 
     SELECT 
-        b.*,
-        c.* EXCEPT (value),
-        b.value AS "value_block", 
-        c.value AS "value_cpuuser"
+        b.time AS time_block,
+        b.value AS value_block,
+        b.ngpus AS ngpus_block,
+        b.submit_time AS submit_time_block,
+        b.start_time AS start_time_block,
+        b.end_time AS end_time_block,
+        b.timelimit AS timelimit_block,
+        b.nhosts AS nhosts_block,
+        b.ncores AS ncores_block,
+        b.account AS account_block,
+        b.queue AS queue_block,
+        b.host AS host_block,
+        b.jid AS jid_block,
+        b.event AS event_block,
+        b.unit AS unit_block,
+        b.jobname AS jobname_block,
+        b.exitcode AS exitcode_block,
+        b.host_list AS host_list_block,
+        b.username AS username_block,
+        c.time AS time_cpuuser,
+        c.value AS value_cpuuser,
+        c.ngpus AS ngpus_cpuuser,
+        c.submit_time AS submit_time_cpuuser,
+        c.start_time AS start_time_cpuuser,
+        c.end_time AS end_time_cpuuser,
+        c.timelimit AS timelimit_cpuuser,
+        c.nhosts AS nhosts_cpuuser,
+        c.ncores AS ncores_cpuuser,
+        c.account AS account_cpuuser,
+        c.queue AS queue_cpuuser,
+        c.host AS host_cpuuser,
+        c.jid AS jid_cpuuser,
+        c.event AS event_cpuuser,
+        c.unit AS unit_cpuuser,
+        c.jobname AS jobname_cpuuser,
+        c.exitcode AS exitcode_cpuuser,
+        c.host_list AS host_list_cpuuser,
+        c.username AS username_cpuuser
     FROM 
         event_block b 
     JOIN 
         event_cpuuser c ON b.time = c.time AND b.jid = c.jid AND b.host = c.host 
     """
+
     cur.execute(merge_block_and_cpu_user)
 
     conn.commit()  # Commit after the join operation
@@ -227,13 +263,17 @@ def create_block_and_cpu_temp_table():
 def create_block_cpu_gpu_temp_table():
     print(f"Starting create_block_cpu_gpu_temp_table at {print_mountain_time()}")
     # Create indexes
-    create_idx_block_and_cpu = "CREATE INDEX IF NOT EXISTS idx_block_and_cpu ON block_and_cpu(time, jid, host);"
+    create_idx_block_and_cpu = "CREATE INDEX IF NOT EXISTS idx_block_and_cpu ON block_and_cpu(time_block, jid_block, host_block);"
     cur.execute(create_idx_block_and_cpu)
 
     create_idx_event_gpu_usage = "CREATE INDEX IF NOT EXISTS idx_event_gpu_usage ON event_gpu_usage(time, jid, host);"
     cur.execute(create_idx_event_gpu_usage)
 
     conn.commit()  # Commit after creating indexes
+
+    # TODO REMOVE AFTER DEV
+    print_table_cols("block_and_cpu")
+    print_table_cols("event_gpu_usage")
 
     # Perform the join operation
     create_block_cpu_gpu = """
@@ -243,7 +283,7 @@ def create_block_cpu_gpu_temp_table():
         g.value AS "value_gpu"
     FROM block_and_cpu bc 
     LEFT JOIN event_gpu_usage g 
-    ON bc."time" = g.time AND bc."jid" = g.jid AND bc."host" = g.host;
+    ON bc."time_block" = g.time AND bc."jid_block" = g.jid AND bc."host_block" = g.host;
     """
     cur.execute(create_block_cpu_gpu)
 
@@ -450,7 +490,7 @@ def merge_and_export_all_data():
 
 
 if __name__ == "__main__":
-    print_mountain_time()
+    print(f"Started at {print_mountain_time()}")
     start_time = time.time()
 
     merge_and_export_all_data()
